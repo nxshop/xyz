@@ -134,6 +134,21 @@ body .pcard.is-featured{ background:linear-gradient(180deg,rgba(29,94,225,.28),#
     <div class="toh-bob font-display font-700 text-5xl tracking-widest text-plasma-500" style="text-shadow:0 0 22px rgba(29,94,225,.55)">TALI</div>
   </div>
 </div>
+<script>
+/* FAILSAFE: never let the logo loading screen stay forever */
+(function(){
+  function hide(){
+    var o=document.getElementById('loadOverlay'); if(!o) return;
+    o.style.transition='opacity .4s'; o.style.opacity='0';
+    setTimeout(function(){ var x=document.getElementById('loadOverlay'); if(x) x.remove(); },400);
+  }
+  setTimeout(hide, 10000);                       // hard limit: 10s
+  function onFail(e){ console.error('[TOH failsafe]', e && (e.reason || e.message || e)); setTimeout(function(){ if(!window.__appReady) hide(); }, 3000); }
+  window.addEventListener('error', onFail);
+  window.addEventListener('unhandledrejection', onFail);
+})();
+</script>
+
 
 
 
@@ -706,7 +721,7 @@ function _listen(st){
 }
 FB._p = Promise.race([
   Promise.all(Object.values(STORES).map(_listen)).then(r=>{ FB.loaded = r.every(Boolean); return FB.loaded; }),
-  new Promise(res=>setTimeout(()=>res(false), 30000))
+  new Promise(res=>setTimeout(()=>res(false), 8000))
 ]).then(ok=>{ if(!ok && !FB.loaded) _showFbError(FB.error || {code:'timeout'}); return ok; });
 FB.ready = ()=>FB._p;
 
