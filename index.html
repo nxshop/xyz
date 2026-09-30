@@ -575,6 +575,7 @@ const FIREBASE_CONFIG = {
   apiKey: "AIzaSyDu01c0y-9KcRk4EZlGnI1lylE65Rv49jA",
   authDomain: "mafgjojrn.firebaseapp.com",
   projectId: "mafgjojrn",
+  databaseURL: "https://mafgjojrn-default-rtdb.firebaseio.com",
   storageBucket: "mafgjojrn.firebasestorage.app",
   messagingSenderId: "861094971290",
   appId: "1:861094971290:web:fe58ebe0fda23dae751c23",
@@ -585,6 +586,8 @@ try{ firebase.analytics(); }catch(e){}
 const fdb = firebase.firestore();
 // force long-polling: mobile networks often block/stall Firestore's streaming channel -> "timeout"
 try{ fdb.settings({ ignoreUndefinedProperties:true, experimentalForceLongPolling:true }); }catch(e){}
+// offline cache: after the first visit data shows instantly, even on slow LTE
+try{ fdb.enablePersistence({ synchronizeTabs:true }).catch(function(e){ console.warn('persistence off:', e && e.code); }); }catch(e){}
 
 // ---- Firebase Authentication: every member is mirrored into Authentication (best effort) ----
 // The shop still verifies the password against Firestore, so login can never break because of Auth.
@@ -703,7 +706,7 @@ function _listen(st){
 }
 FB._p = Promise.race([
   Promise.all(Object.values(STORES).map(_listen)).then(r=>{ FB.loaded = r.every(Boolean); return FB.loaded; }),
-  new Promise(res=>setTimeout(()=>res(false), 10000))
+  new Promise(res=>setTimeout(()=>res(false), 30000))
 ]).then(ok=>{ if(!ok && !FB.loaded) _showFbError(FB.error || {code:'timeout'}); return ok; });
 FB.ready = ()=>FB._p;
 
