@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta id="viewportMeta" name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ຕາລີ — ຂາຍພາແນລ Free Fire</title>
+<title>ຕາລີ — ຮ້ານຂາຍພາແນລ Free Fire</title>
 <meta name="description" content="">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700;800&family=Noto+Sans+Lao:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -560,6 +560,7 @@ body .pcard.is-featured{ background:linear-gradient(180deg,rgba(29,94,225,.28),#
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-analytics-compat.js"></script>
 <script>
 const DB_KEYS = { users:'vp_users', admins:'vp_admins', products:'vp_products', orders:'vp_orders', logs:'vp_logs', session:'vp_session', theme:'vp_theme', settings:'vp_settings', topups:'vp_topups', activeTopups:'vp_active_topups' };
@@ -583,6 +584,32 @@ firebase.initializeApp(FIREBASE_CONFIG);
 try{ firebase.analytics(); }catch(e){}
 const fdb = firebase.firestore();
 try{ fdb.settings({ ignoreUndefinedProperties:true, experimentalAutoDetectLongPolling:true }); }catch(e){}
+
+// ---- Firebase Authentication: every member is mirrored into Authentication (best effort) ----
+// The shop still verifies the password against Firestore, so login can never break because of Auth.
+let fauth = null;
+try{ fauth = firebase.auth(); }catch(e){ console.warn('Firebase Auth SDK not loaded', e); }
+const AUTH_EMAIL_DOMAIN = '@members.tohshop.app';
+function authEmailFor(username){ return String(username||'').trim().toLowerCase() + AUTH_EMAIL_DOMAIN; }
+async function syncMemberToAuth(user, password){
+  if(!fauth || !user || !user.username || !password) return;
+  const email = authEmailFor(user.username);
+  try{
+    try{ await fauth.signInWithEmailAndPassword(email, password); }
+    catch(e){
+      const c = e && e.code;
+      if(c==='auth/user-not-found' || c==='auth/invalid-credential' || c==='auth/invalid-login-credentials'){
+        await fauth.createUserWithEmailAndPassword(email, password);   // first time: create the Authentication account
+      } else throw e;
+    }
+    const authUid = fauth.currentUser && fauth.currentUser.uid;
+    if(authUid){
+      const us = loadDB(DB_KEYS.users, []);
+      const i = us.findIndex(u=>u.id===user.id);
+      if(i>-1 && us[i].authUid !== authUid){ us[i].authUid = authUid; saveDB(DB_KEYS.users, us); }
+    }
+  }catch(e){ console.warn('Auth sync skipped:', (e && e.code) || e); }
+}
 
 const FB = { loaded:false, error:null };
 const LOCAL_KEYS = new Set([DB_KEYS.session, DB_KEYS.theme]);
@@ -608,11 +635,35 @@ function _showFbError(err){
   try{ if(window.Swal) Swal.fire({icon:'error', title:'Firebase', text:msg, background:'#06070C', color:'#ECEFF3'}); else alert(msg); }catch(e){ alert(msg); }
 }
 
+function _fbBanner(text){
+  try{
+    let b = document.getElementById('fbStatusBanner');
+    if(!b){
+      b = document.createElement('div'); b.id = 'fbStatusBanner';
+      b.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#7f1d1d;color:#fff;font:13px/1.4 sans-serif;padding:10px 14px;text-align:center';
+      (document.body||document.documentElement).appendChild(b);
+    }
+    b.textContent = text;
+  }catch(e){}
+}
+function _fbBannerHide(){ try{ const b = document.getElementById('fbStatusBanner'); if(b) b.remove(); }catch(e){} }
+
 function _listen(st){
   return new Promise(resolve=>{
     let first = true;
-    fdb.collection(st.key).onSnapshot(snap=>{
+    let gotServer = false;   // only trust a snapshot that came from the SERVER (not the empty offline cache)
+    let subFirst = true;     // first server snapshot of each (re)subscription
+    const onSnap = snap=>{
       let changed = false;
+      if(!snap.metadata.fromCache){
+        _fbBannerHide();
+        if(subFirst){
+          subFirst = false;
+          // reconcile: drop anything the server no longer has (e.g. after a disconnect)
+          const ids = new Set(snap.docs.map(d=> st.type==='map' ? decodeURIComponent(d.id) : d.id));
+          [...st.map.keys()].forEach(k=>{ if(!ids.has(k)){ st.map.delete(k); changed = true; } });
+        }
+      }
       snap.docChanges().forEach(ch=>{
         if(ch.doc.metadata.hasPendingWrites) return;   // our own optimistic write, cache already has it
         if(st.type==='map'){
@@ -627,12 +678,22 @@ function _listen(st){
           st.map.set(id, { v, sig:sigOf(v) }); changed = true;
         }
       });
-      if(first){ first = false; resolve(true); }
+      if(!gotServer && !snap.metadata.fromCache){
+        gotServer = true; first = false; resolve(true);
+        if(window.__appReady && window.__dbChanged){ try{ window.__dbChanged(st.key); }catch(e){ console.warn(e); } }
+      }
       else if(changed && window.__dbChanged){ try{ window.__dbChanged(st.key); }catch(e){ console.warn(e); } }
-    }, err=>{
+    };
+    const onErr = err=>{
       FB.error = err; _showFbError(err);
+      const code = (err && (err.code||err.message)) || 'unknown';
+      _fbBanner('⚠ ເຊື່ອມຕໍ່ຖານຂໍ້ມູນບໍ່ໄດ້ — ຂໍ້ມູນທີ່ເຫັນອາດບໍ່ຄົບ ('+st.key+': '+code+')');
       if(first){ first = false; resolve(false); }
-    });
+      subFirst = true;
+      setTimeout(sub, 8000);   // a failed listener never recovers by itself, so subscribe again
+    };
+    const sub = ()=>{ fdb.collection(st.key).onSnapshot(onSnap, onErr); };
+    sub();
   });
 }
 FB._p = Promise.race([
@@ -642,15 +703,16 @@ FB._p = Promise.race([
 FB.ready = ()=>FB._p;
 
 function _commit(ops){
-  if(!ops.length) return Promise.resolve();
+  if(!ops.length) return Promise.resolve(true);
   const chunks = []; for(let i=0;i<ops.length;i+=400) chunks.push(ops.slice(i,i+400));
   return Promise.all(chunks.map(ch=>{
     const b = fdb.batch();
     ch.forEach(o=>{ const ref = fdb.collection(o.col).doc(o.id); if(o.del) b.delete(ref); else b.set(ref, o.data); });
     return b.commit();
-  })).catch(e=>{
+  })).then(()=>true).catch(e=>{
     console.error('Firestore write failed', e);
     try{ if(window.Swal) Swal.fire({toast:true,position:'top-end',showConfirmButton:false,timer:5000,icon:'error',title:'ບັນທຶກຂໍ້ມູນບໍ່ສຳເລັດ',text:(e&&e.message)||'',background:'#06070C',color:'#ECEFF3'}); }catch(_){}
+    return false;
   });
 }
 
@@ -709,7 +771,7 @@ function saveDB(key, val){
     const base = val.__keys || new Set(st.map.keys());
     base.forEach(k=>{ if(!seen.has(k) && st.map.has(k)){ st.map.delete(k); ops.push({ col:key, id:encodeURIComponent(k), del:true }); } });
   }
-  _commit(ops);
+  return _commit(ops);   // Promise<true|false> : true = Firebase server confirmed the write
 }
 
 // append one log entry (keeps only the newest ~500)
@@ -755,7 +817,10 @@ function saveRedeemCodes(codes){ saveDB(REDEEM_KEY, codes); }
 // Resizes/compresses an uploaded image file before it's turned into a
 // base64 string. Without this, a phone photo (2-8MB) blows past the browser's
 // localStorage size limit and the settings fail to save.
-function compressImageFile(file, maxDim, quality){
+function compressImageFile(file, maxDim, quality, maxChars){
+  // Auto-compress: shrink quality, then size, until the base64 result fits under maxChars
+  // (keeps every Firestore document safely below the 1MB limit).
+  maxChars = maxChars || 600000;
   return new Promise((resolve, reject)=>{
     const reader = new FileReader();
     reader.onerror = ()=>reject(new Error('read failed'));
@@ -763,15 +828,24 @@ function compressImageFile(file, maxDim, quality){
       const img = new Image();
       img.onerror = ()=>reject(new Error('image decode failed'));
       img.onload = function(){
-        let w = img.width, h = img.height;
-        if(w > maxDim || h > maxDim){
-          if(w >= h){ h = Math.round(h * maxDim / w); w = maxDim; }
-          else { w = Math.round(w * maxDim / h); h = maxDim; }
+        let scale = 1, q = quality, out = '';
+        for(let i=0; i<14; i++){
+          let w = img.width, h = img.height;
+          const md = Math.max(64, Math.round(maxDim * scale));
+          if(w > md || h > md){
+            if(w >= h){ h = Math.round(h * md / w); w = md; }
+            else { w = Math.round(w * md / h); h = md; }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          const g = canvas.getContext('2d');
+          g.fillStyle = '#ffffff'; g.fillRect(0, 0, w, h);   // JPEG has no transparency
+          g.drawImage(img, 0, 0, w, h);
+          out = canvas.toDataURL('image/jpeg', q);
+          if(out.length <= maxChars) break;
+          if(q > 0.5) q = Math.max(0.5, q - 0.1); else { scale *= 0.8; }
         }
-        const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', quality));
+        resolve(out);
       };
       img.src = ev.target.result;
     };
@@ -826,7 +900,6 @@ async function seedIfNeeded(){
   if(loadDB(DB_KEYS.orders, []).length === 0) saveDB(DB_KEYS.orders, []);
   if(loadDB(DB_KEYS.logs, []).length === 0) saveDB(DB_KEYS.logs, []);
   if(loadDB(DB_KEYS.topups, []).length === 0) saveDB(DB_KEYS.topups, []);
-  if(!Object.keys(loadDB(DB_KEYS.settings, {})).length) saveDB(DB_KEYS.settings, { qrImage: null, bgImage: null, heroBannerImage: null, siteLogo: null, siteName: '', promoText: '', promoText2: '', fbApiKey: '', adminPanelUrl: 'https://admin94357757.netlify.app' });
   renderTopupAmountButtons();
 }
 
@@ -850,6 +923,7 @@ const api = {
     const users = loadDB(DB_KEYS.users, []);
     const user = users.find(u=> u.username.toLowerCase()===String(id).trim().toLowerCase());
     if(!user) throw new Error('ບໍ່ພົບບັນຊີຜູ້ໃຊ້');
+    if(user.suspended) throw new Error('ບັນຊີຂອງທ່ານຖືກລະງັບ, ກະລຸນາຕິດຕໍ່ແອດມິນ');
     if(!user.passwordHash || !user.salt) throw new Error('ບັນຊີນີ້ບໍ່ມີລະຫັດຜ່ານໃນລະບົບ, ກະລຸນາສະໝັກໃໝ່');
     const ok = await verifyPassword(password, user.salt, user.passwordHash);
     if(!ok) throw new Error('ລະຫັດຜ່ານບໍ່ຖືກຕ້ອງ');
@@ -877,6 +951,10 @@ let CURRENT_PAY_METHOD = 'qr';
 // so balance / notification changes show up without a manual reload.
 async function refreshOwnUser(){
   if(!SESSION || SESSION.role!=='user') return;
+  if(FB.loaded && !loadDB(DB_KEYS.users, []).some(u=>u.id===SESSION.id)){
+    try{ if(fauth) fauth.signOut(); }catch(e){}
+    SESSION = null; saveDB(DB_KEYS.session, null); renderAuthArea(); toastInfo('ບັນຊີນີ້ບໍ່ມີໃນລະບົບແລ້ວ'); go('home'); return;
+  }
   try{
     renderAuthArea();
     if(document.getElementById('view-dashboard') && document.getElementById('view-dashboard').classList.contains('active')){
@@ -1444,6 +1522,7 @@ async function doLogin(){
   try{
     const {user} = await api.login({id:idv, password:pass});
     SESSION = {role:'user', id:user.id}; saveDB(DB_KEYS.session, SESSION);
+    syncMemberToAuth(user, pass);   // appears in Firebase Authentication → Users
     // this device/browser may have a stale cached balance from before (e.g. from
     // before a purchase made elsewhere) — pull the real current balance from the
     // cloud now, so the very first screen after login shows the correct amount
@@ -1478,6 +1557,7 @@ async function doRegister(){
   try{
     const {user} = await api.register({username,password});
     SESSION = {role:'user', id:user.id}; saveDB(DB_KEYS.session, SESSION);
+    syncMemberToAuth(user, password);   // appears in Firebase Authentication → Users
     await refreshOwnUser();
     renderSiteBranding(); applyBackground(); renderHeroBanner(); renderMarquee(); renderHomeGrids(); updateHeroStats();
     renderAuthArea(); toastOk('ສະໝັກສະມາຊິກສຳເລັດ!'); go('home');
@@ -1496,7 +1576,7 @@ async function doReset(){
   toastInfo('ກະລຸນາຕິດຕໍ່ແອດມິນເພື່ອຣີເຊັດລະຫັດຜ່ານ');
   switchAuth('login');
 }
-function logout(){ SESSION=null; saveDB(DB_KEYS.session,null); renderAuthArea(); toastInfo('ອອກຈາກລະບົບແລ້ວ'); go('home'); }
+function logout(){ try{ if(fauth) fauth.signOut(); }catch(e){} SESSION=null; saveDB(DB_KEYS.session,null); renderAuthArea(); toastInfo('ອອກຈາກລະບົບແລ້ວ'); go('home'); }
 
 function currentUser(){ if(!SESSION||SESSION.role!=='user') return null; return loadDB(DB_KEYS.users,[]).find(u=>u.id===SESSION.id); }
 
@@ -1507,6 +1587,7 @@ function fillDashboard(){
   document.getElementById('dashEmail').textContent = user.email || user.username;
   document.getElementById('dashBalanceMini').textContent = fmtK(user.balance||0);
   document.getElementById('pfUsername').value = user.username;
+  document.getElementById('pfUsername').disabled = true;   // username is the login identity, cannot be changed
   document.getElementById('pfEmail').value = user.email||'';
   document.getElementById('pfPhone').value = user.phone||'';
   renderOrderHistory(); renderFavGrid(); renderDashNotifs(); renderMyCards();
@@ -1540,7 +1621,6 @@ function dashBackToMenu(){
 const dashShowMenu = dashBackToMenu;
 async function saveProfile(){
   const user = currentUser(); if(!user) return;
-  user.username = document.getElementById('pfUsername').value.trim() || user.username;
   user.phone = document.getElementById('pfPhone').value.trim() || user.phone;
   const users = loadDB(DB_KEYS.users,[]);
   const idx = users.findIndex(u=>u.id===user.id); users[idx]=user; saveDB(DB_KEYS.users, users);
@@ -1562,6 +1642,7 @@ async function changePassword(){
     const salt = genSalt();
     u.salt = salt; u.passwordHash = await hashPassword(next, salt);
     users[idx] = u; saveDB(DB_KEYS.users, users);
+    try{ if(fauth && fauth.currentUser) await fauth.currentUser.updatePassword(next); else await syncMemberToAuth(u, next); }catch(e){ console.warn('Auth password sync skipped', e); }
     document.getElementById('curPass').value=''; document.getElementById('newPass2').value='';
     toastOk('ປ່ຽນລະຫັດຜ່ານສຳເລັດ');
   }catch(e){
@@ -1809,21 +1890,12 @@ function renderPaymentQr(holderId, payload){
 document.getElementById('topupSlipInput')?.addEventListener('change', async function(e){
   const file = e.target.files[0]; if(!file) return;
   try{
-    const dataUrl = await compressImageFile(file, 1000, 0.7);
+    const dataUrl = await compressImageFile(file, 1000, 0.7, 250000);
     document.getElementById('topupSlipPreview').src = dataUrl;
     document.getElementById('topupSlipPreview').classList.remove('hidden');
     window._topupSlipDataUrl = dataUrl;
   }catch(err){ toastErr('ບໍ່ສາມາດອ່ານຮູບນີ້ໄດ້'); }
 });
-function sendFacebookNotify(message){
-  try{
-    const settings = loadDB(DB_KEYS.settings, {fbApiKey:''});
-    if(!settings.fbApiKey) return;
-    const url = `https://api.callmebot.com/facebook/send.php?apikey=${encodeURIComponent(settings.fbApiKey)}&text=${encodeURIComponent(message)}`;
-    const pixel = new Image();
-    pixel.src = url;
-  }catch(e){ /* silent — notification is best-effort, never block the app */ }
-}
 async function submitTopup(){
   const user = currentUser(); if(!user) return;
   if(!CURRENT_TOPUP_AMOUNT || CURRENT_TOPUP_AMOUNT < 1000) return toastErr('ກະລຸນາເລືອກ ຫລື ປ້ອນຈຳນວນເງິນ');
@@ -1834,17 +1906,14 @@ async function submitTopup(){
   const topup = { id: uid('top'), userId:user.id, amount:CURRENT_TOPUP_AMOUNT, slip:slipData, status:'pending_verification', createdAt: nowISO(), verifiedAt: null };
   topups.push(topup); saveDB(DB_KEYS.topups, topups);
   log('TOPUP_SUBMIT', `Topup ${topup.id} ₭${topup.amount} by ${user.username}`);
-  const _link = (settings.adminPanelUrl||'').trim().replace(/\/$/,'');
-  const _linkLine = _link ? `\n👉 ໜ້າແອັດມິນ: ${_link}/?tab=topups` : '';
-  sendFacebookNotify(`ລູກຄ້າແຈ້ເຕີມເງິນຮ້ານ TOH Shop\n👤 ${user.username}\n💰 ₭${fmtK(topup.amount)}\n⏳ ລໍວถ້າແອັດມິນກວດສົບ${_linkLine}`);
   window._topupSlipDataUrl = null;
   document.getElementById('topupSlipPreview').classList.add('hidden');
   clearInterval(_countdownInterval);
   clearActiveTopupSession(user.id);
   Swal.fire({
     icon:'success',
-    title:'ສົ່ງການເຕີມເງິນສຳເລີດ ✅',
-    html:`<p style="font-size:14px;color:#9AA1B3;margin-bottom:8px;">ລໍວถ້າແອັດມິນກວດສົບແລະຊື່ນຊັນ</p>
+    title:'ສົ່ງການເຕີມເງິນສຳເລັດ ✅',
+    html:`<p style="font-size:14px;color:#9AA1B3;margin-bottom:8px;">ລໍຖ້າແອັດມິນກວດສອບ ແລະ ຢືນຢັນ</p>
             <div style="background:#0D0F1A;border:1px solid #282E4A;border-radius:10px;padding:12px;text-align:left;">
               <p style="font-size:13px;color:#9AA1B3;">&#x23F3; ເງິນຈະເຂ້າກະເປົາຂອງທ່ານພາຍໃນ <b style="color:#70CBFF;">1-3 ນາທີ</b> ຫລັງແອັດມິນຊື່ນຊັນ</p>
               <p style="font-size:12px;color:#9498A3;margin-top:6px;">&#x26A0;&#xFE0F; ຫາກເງິນບໍ່ເຂ້າພາຍໃນ  3 ນາທີ ກະລຸນາທັກຫາແອັດມິນເດີຍການ</p>
@@ -1945,11 +2014,6 @@ async function buyNow(productId){
   orders.unshift(order);
   saveDB(DB_KEYS.orders, orders);
   log('ORDER_WALLET_PAY', `${user.username} ຊື້ ${itemLabel} ₭${fmtK(freshPrice)} (ຮັບທັນທີ)`);
-  // ແຈ້ງ Facebook
-  const settings = loadDB(DB_KEYS.settings,{});
-  const _link = (settings.adminPanelUrl||'').trim().replace(/\/$/,'');
-  const _linkLine = _link ? `\n👉 ໜ້າແອັດມິນ: ${_link}/?tab=orders` : '';
-  sendFacebookNotify(`ລູກຄ້າຊື້ສິນຄ້າສຳເລັດ (Wallet, ສົ່ງໃຫ້ທັນທີ)\n👤 ${user.username}\n🛒 ${itemLabel}\n💰 ₭${fmtK(freshPrice)}${_linkLine}`);
   // ແຈ້ງເຕືອນຜູ້ໃຊ້
   if(uIdx>-1){
     users[uIdx].notifications = users[uIdx].notifications||[];
