@@ -659,6 +659,7 @@ function _showFbError(err){
 }
 
 function _fbBanner(text){
+  console.warn('[Firebase]', text); return;   // red status banner disabled
   try{
     let b = document.getElementById('fbStatusBanner');
     if(!b){
@@ -909,6 +910,7 @@ const CATEGORIES = [
 ];
 
 async function seedIfNeeded(){
+  try{ renderTopupAmountButtons(); }catch(e){ console.warn(e); }   // always show amount buttons, even if Firebase is slow
   if(!FB.loaded) return;   // Firestore not reachable: don't seed
   let admins = loadDB(DB_KEYS.admins, []);
   if(admins.length === 0){
@@ -1827,7 +1829,8 @@ function renderWallet(){
   document.getElementById('walletBalance').textContent = `₭ ${fmtK(user.balance||0)}`;
   document.getElementById('topupConfirmArea').classList.add('hidden');
   document.querySelectorAll('.topup-amt-btn').forEach(b=>b.classList.remove('border-plasma-500','bg-plasma-500/10'));
-  document.getElementById('customTopupAmount').value='';
+  if(!document.getElementById('customTopupAmount')) renderTopupAmountButtons();
+  const _cta = document.getElementById('customTopupAmount'); if(_cta) _cta.value='';
   setTopupPickerLocked(false);
 
   const activeSession = getActiveTopupSession(user.id);
@@ -2250,7 +2253,7 @@ async function redeemCode(raw){
     clearTimeout(t);
     t = setTimeout(function(){
       try{
-        if(key===DB_KEYS.settings){ applyBackground(); renderHeroBanner(); renderSiteBranding(); renderMarquee(); }
+        if(key===DB_KEYS.settings){ applyBackground(); renderHeroBanner(); renderSiteBranding(); renderMarquee(); try{ renderTopupAmountButtons(); }catch(e){} }
         if(key===DB_KEYS.products){ renderCategories(); renderHomeGrids(); updateHeroStats(); }
         if(key===DB_KEYS.users || key===DB_KEYS.topups || key===DB_KEYS.orders){ refreshOwnUser(); }
       }catch(e){ console.warn('realtime refresh', e); }
